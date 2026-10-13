@@ -129,16 +129,15 @@ class Handler(BaseHTTPRequestHandler):
                 d["bookings"].append(rec)
                 save(d)
             return self._send(201, {"id": rec["id"]})
-        if path == "/api/pin":
-            h = str(body.get("pinHash", ""))[:32]
-            if not re.fullmatch(r"[0-9a-f]{1,16}", h):
-                return self._send(400, {"error": {"code": "invalid"}})
-            with LOCK:
-                d = load()
-                d["pinHash"] = h
-                save(d)
-            return self._send(200, {"ok": True})
-        self._send(404, {"error": {"code": "notfound"}})
+       if path == "/api/pin":
+            import os
+            ADMIN_PIN = os.environ.get("ADMIN_PIN", "12345678")
+            entered_pin = str(body.get("pinHash", ""))
+            
+            if entered_pin == ADMIN_PIN:
+                return self._send(200, {"ok": True})
+        else:
+             return self._send(401, {"error": {"code": "invalid_pin", "message": "Incorrect PIN"}})
 
     def do_DELETE(self):
         m = re.fullmatch(r"/api/bookings/([\w-]+)", unquote(urlparse(self.path).path))
