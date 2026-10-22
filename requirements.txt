@@ -1,0 +1,5 @@
+pymongo>=4.6,<5
+dnspython>=2.4
+certifi
+python-dotenv
+tzdata
