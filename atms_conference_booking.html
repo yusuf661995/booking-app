@@ -1014,6 +1014,81 @@
       gap: 6px 18px;
       justify-content: space-between
     }
+
+    /* Booking pop-up (opens when a free slot is clicked on the schedule) */
+    .modal-back {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 24px 14px;
+      overflow-y: auto;
+      background: rgba(10, 10, 30, .55)
+    }
+
+    .modal-back[hidden] {
+      display: none
+    }
+
+    .modal-box {
+      position: relative;
+      width: 100%;
+      max-width: 520px;
+      margin: auto
+    }
+
+    .modal-x {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      z-index: 1;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--fg);
+      font-size: 20px;
+      line-height: 1;
+      cursor: pointer
+    }
+
+    /* Booking details pop-up */
+    .bk {
+      cursor: pointer
+    }
+
+    .bk:hover {
+      filter: brightness(.96)
+    }
+
+    .dt-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px
+    }
+
+    .dt-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px
+    }
+
+    .dt-row span:first-child {
+      color: var(--muted)
+    }
+
+    .dt-row span:last-child {
+      text-align: right;
+      font-weight: 600;
+      overflow-wrap: anywhere
+    }
   </style>
 
   <header class="masthead">
@@ -1161,6 +1236,18 @@
     <footer class="foot"><span>ATMS &amp; CO. LLP · For internal use only</span><span>Room administrator: Utkarsh</span>
     </footer>
   </main>
+  <div class="modal-back" id="bookModal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-label="Book a slot">
+      <button type="button" class="modal-x" id="bookClose" aria-label="Close">&times;</button>
+      <div id="bookModalBody"></div>
+    </div>
+  </div>
+  <div class="modal-back" id="detailModal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-label="Booking details">
+      <button type="button" class="modal-x" id="detailClose" aria-label="Close">&times;</button>
+      <div class="card" id="detailBody"></div>
+    </div>
+  </div>
   <div class="toast" id="toast" hidden></div>
 
   <script>
@@ -1212,6 +1299,7 @@
     // Tabs
     document.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
     function showTab(t) {
+      closeBook(); closeDetail();
       document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
       ["today", "book", "mine", "admin"].forEach(x => $("#tab-" + x).hidden = x !== t); renderAll()
     }
@@ -1238,17 +1326,129 @@
         }
         bookings.filter(b => b.room === r && b.date === selDay).forEach(b => {
           const top = (b.start - OPEN) / 30 * H, h = (b.end - b.start) / 30 * H - 3;
-          html += `<div class="bk ${b.blocked ? "blocked" : r}" style="top:${top + 1}px;height:${h}px"><b>${esc(b.title)}</b><span class="t">${fmtT(b.start)}–${fmtT(b.end)}</span>${h > 60 ? `<div class="t">${esc(b.who)}</div>` : ""}</div>`
+          html += `<div class="bk ${b.blocked ? "blocked" : r}" data-id="${esc(b.id)}" style="top:${top + 1}px;height:${h}px"><b>${esc(b.title)}</b><span class="t">${fmtT(b.start)}–${fmtT(b.end)}</span>${h > 60 ? `<div class="t">${esc(b.who)}</div>` : ""}</div>`
         });
         html += "</div>"
       }
       if (selDay === today && nowMin >= OPEN && nowMin < CLOSE) {const y = (nowMin - OPEN) / 30 * H; html = html.replace(/<div class="col">/g, `<div class="col"><div class="nowline" style="top:${y}px"></div>`)}
       $("#board").innerHTML = html;
+      document.querySelectorAll(".bk").forEach(el => el.onclick = () => openDetail(el.dataset.id));
       document.querySelectorAll(".cell:not(:disabled)").forEach(b => b.onclick = () => {
-        $("#fRoom").value = b.dataset.r; $("#fDate").value = selDay; showTab("book"); fillStarts();
-        const o = [...$("#fStart").options].find(o => o.value === b.dataset.m && !o.disabled); if (o) $("#fStart").value = o.value; updSummary(); $("#fTitle").focus()
+        if (!me) {toast("Enter your name at the top first."); $("#nameInput").focus(); return }
+        $("#fRoom").value = b.dataset.r; $("#fDate").value = selDay; fillStarts();
+        const o = [...$("#fStart").options].find(o => o.value === b.dataset.m && !o.disabled); if (o) $("#fStart").value = o.value; updSummary(); openBook()
       })
     }
+
+    // Booking details pop-up (click a booking on the schedule)
+    function openDetail(id) {
+      const b = bookings.find(x => x.id === id); if (!b) return;
+      const dur = b.end - b.start, row = (k, v) => `<div class="dt-row"><span>${k}</span><span>${v}</span></div>`;
+      const made = b.createdAt ? new Date(b.createdAt).toLocaleString("en-IN", {day: "numeric", month: "short", hour: "numeric", minute: "2-digit"}) : "";
+      const live = b.date > today || (b.date === today && b.end > nowMin);
+      const can = canWrite && live && (isMine(b) || adminOpen);
+      if (can && adminOpen) {openEdit(b.id); return }   // admin only: same modal, fields editable straight away
+      $("#detailBody").innerHTML = `<h2 style="margin-top:0">${esc(b.title)}</h2>`
+        + row("Room", `<span class="chip ${b.blocked ? "blocked" : b.room}">${b.blocked ? "Blocked · " : ""}${ROOMS[b.room]}</span>`)
+        + row("Date", fmtD(b.date) + (b.date === today ? " (today)" : ""))
+        + row("Time", `${fmtT(b.start)} – ${fmtT(b.end)}`)
+        + row("Duration", durTxt(dur))
+        + row(b.blocked ? "Blocked by" : "Booked by", esc(b.who))
+        + (made ? row("Booked on", made) : "")
+        + (can ? `<div class="dt-actions"><button class="btn ghost small" data-cancel="${esc(b.id)}">Cancel this booking</button></div>` : "");
+      wireCancel($("#detailBody"), closeDetail);
+      $("#detailModal").hidden = false
+    }
+
+    // Edit a booking inside the same details pop-up
+    function openEdit(id) {
+      const b = bookings.find(x => x.id === id); if (!b) return;
+      const ex = (r, d, s, e) => bookings.find(x => x.id !== b.id && x.room === r && x.date === d && s < x.end && x.start < e);
+      const dayList = days.includes(b.date) ? days : [b.date, ...days];
+      let edur = b.end - b.start;
+      const row = (k, v) => `<div class="dt-row"><span>${k}</span><span>${v}</span></div>`;
+      const made = b.createdAt ? new Date(b.createdAt).toLocaleString("en-IN", {day: "numeric", month: "short", hour: "numeric", minute: "2-digit"}) : "";
+      $("#detailBody").innerHTML = `<h2 style="margin-top:0">${b.blocked ? "Blocked slot" : "Booking details"}</h2>
+        <form class="form" id="editForm" novalidate>
+          <label for="eTitle">${b.blocked ? "Reason" : "Meeting title"}<input type="text" id="eTitle" maxlength="${b.blocked ? 50 : 60}" value="${esc(b.title)}"></label>
+          <div class="row2">
+            <label for="eRoom">Room<select id="eRoom">${Object.entries(ROOMS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
+            <label for="eDate">Date<select id="eDate">${dayList.map(d => `<option value="${d}">${fmtD(d)}${d === today ? " (today)" : ""}</option>`).join("")}</select></label>
+          </div>
+          <div class="row2">
+            <label for="eStart">From<select id="eStart"></select></label>
+            <label for="eEnd">Until<select id="eEnd"></select></label>
+          </div>
+          <div class="summary" id="eSummary"></div>
+          <div id="eMsg"></div>
+          <div><button class="btn" type="submit" id="eSave">Save changes</button></div>
+        </form>`
+        + `<div style="margin-top:14px">${row(b.blocked ? "Blocked by" : "Booked by", esc(b.who))}${made ? row("Booked on", made) : ""}</div>`
+        + `<div class="dt-actions"><button class="btn ghost small" data-cancel="${esc(b.id)}">Cancel this booking</button></div>`;
+      wireCancel($("#detailBody"), closeDetail); $("#detailModal").hidden = false;
+      $("#eRoom").value = b.room; $("#eDate").value = b.date;
+      const firstOk = sel => [...sel.options].find(o => !o.disabled);
+      function fillTimes(initial) {
+        const r = $("#eRoom").value, d = $("#eDate").value, S = $("#eStart"), E = $("#eEnd");
+        const wantS = initial ? b.start : parseInt(S.value, 10);
+        let h = "";
+        for (let m = OPEN; m < CLOSE; m += 30) {
+          const past = d === today && m < nowMin && !(d === b.date && m === b.start), c = ex(r, d, m, m + 30);
+          h += `<option value="${m}" ${past || c ? "disabled" : ""}>${fmtT(m)}${c ? "  (taken)" : past ? "  (past)" : ""}</option>`
+        }
+        S.innerHTML = h;
+        const so = [...S.options].find(o => +o.value === wantS && !o.disabled) || firstOk(S);
+        S.value = so ? so.value : ""; fillEnds(initial)
+      }
+      function fillEnds(initial) {
+        const r = $("#eRoom").value, d = $("#eDate").value, S = $("#eStart"), E = $("#eEnd"), s = parseInt(S.value, 10);
+        if (isNaN(s)) {E.innerHTML = ""; upd(); return }
+        let h = "";
+        for (let m = s + 30; m <= CLOSE; m += 30) {
+          const past = d === today && m <= nowMin, c = ex(r, d, s, m);
+          h += `<option value="${m}" ${past || c ? "disabled" : ""}>${fmtT(m)}${c ? "  (taken)" : past ? "  (past)" : ""}</option>`
+        }
+        E.innerHTML = h;
+        const want = s + edur, eo = [...E.options].find(o => +o.value === want && !o.disabled) || firstOk(E);
+        if (eo) E.value = eo.value; upd()
+      }
+      function upd() {
+        const s = parseInt($("#eStart").value, 10), e = parseInt($("#eEnd").value, 10);
+        $("#eSummary").textContent = isNaN(s) || isNaN(e) ? "No free time on this day in this room. Pick another day or room." : `${ROOMS[$("#eRoom").value]} · ${fmtD($("#eDate").value)} · ${fmtT(s)} to ${fmtT(e)} (${durTxt(e - s)})`
+      }
+      $("#eRoom").onchange = $("#eDate").onchange = () => fillTimes(false);
+      $("#eStart").onchange = () => fillEnds(false);
+      $("#eEnd").onchange = () => {edur = parseInt($("#eEnd").value, 10) - parseInt($("#eStart").value, 10); upd()};
+      fillTimes(true);
+      $("#editForm").onsubmit = async ev => {
+        ev.preventDefault(); const msg = $("#eMsg"); msg.innerHTML = "";
+        const r = $("#eRoom").value, d = $("#eDate").value, s = parseInt($("#eStart").value, 10), e = parseInt($("#eEnd").value, 10), t = $("#eTitle").value.trim();
+        if (isNaN(s) || isNaN(e)) {msg.innerHTML = '<div class="msg err">There is no free time on this day in this room. Pick another day or room.</div>'; return }
+        if (!t) {msg.innerHTML = `<div class="msg err">${b.blocked ? "Add a reason for the block." : "Add a meeting title so others know what the room is booked for."}</div>`; $("#eTitle").focus(); return }
+        if (r === b.room && d === b.date && s === b.start && e === b.end && t === b.title) {toast("No changes to save"); return }
+        const btn = $("#eSave"); btn.disabled = true; btn.textContent = "Saving…";
+        try {
+          tick();
+          if (d < today || (d === today && (e <= nowMin || (s < nowMin && !(d === b.date && s === b.start))))) throw {code: "past"};
+          await api.update(b.id, {room: r, date: d, start: s, end: e, title: t});
+          await refresh(true); selDay = d; renderDays(); renderBoard(); toast("Booking updated"); openEdit(b.id)
+        } catch (err) {
+          msg.innerHTML = `<div class="msg err">${errText(err)}</div>`; btn.disabled = false; btn.textContent = "Save changes"; refresh(true).then(() => {if ($("#editForm") && err && err.code === "clash") fillTimes(false)})
+        }
+      }
+    }
+    function closeDetail() {$("#detailModal").hidden = true}
+    $("#detailClose").onclick = closeDetail;
+    $("#detailModal").onclick = e => {if (e.target === $("#detailModal")) closeDetail()};
+    document.addEventListener("keydown", e => {if (e.key === "Escape") closeDetail()});
+
+    // Booking pop-up: the same form is moved into the pop-up, and moved back when it closes
+    const bookCard = $("#tab-book .card");
+    function openBook() {$("#fMsg").innerHTML = ""; $("#bookModalBody").appendChild(bookCard); $("#bookModal").hidden = false; $("#fTitle").focus()}
+    function closeBook() {if ($("#bookModal").hidden) return; $("#bookModal").hidden = true; $("#tab-book").appendChild(bookCard)}
+    $("#bookClose").onclick = closeBook;
+    $("#bookModal").onclick = e => {if (e.target === $("#bookModal")) closeBook()};
+    document.addEventListener("keydown", e => {if (e.key === "Escape") closeBook()});
 
     // Book form
     function dateOpts(sel) {const v = sel.value; sel.innerHTML = days.map(d => `<option value="${d}">${fmtD(d)}${d === today ? " (today)" : ""}</option>`).join(""); if (days.includes(v)) sel.value = v}
@@ -1278,6 +1478,10 @@
         const r = await fetch("api/bookings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(rec)});
         let j = {}; try {j = await r.json()} catch (e) { } if (!r.ok) throw (j.error || {code: "net"}); return j
       },
+      async update(id, rec) {
+        const r = await fetch("api/bookings/" + encodeURIComponent(id), {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(Object.assign({}, rec, {pinHash}))});
+        let j = {}; try {j = await r.json()} catch (e) { } if (!r.ok) throw (j.error || {code: "net"}); return j
+      },
       async remove(id) {const r = await fetch("api/bookings/" + encodeURIComponent(id), {method: "DELETE"}); if (!r.ok) throw {code: "net"}},
       async setPin(h) {const r = await fetch("api/pin", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({pinHash: h})}); if (!r.ok) throw {code: "net"}}
     } : {
@@ -1285,6 +1489,11 @@
       async add(rec) {
         const l = LS.get("atms-bookings", []); const c = overlaps(rec.room, rec.date, rec.start, rec.end, l); if (c) throw {code: "clash", c};
         l.push(Object.assign({id: "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)}, rec)); LS.set("atms-bookings", l)
+      },
+      async update(id, rec) {
+        const l = LS.get("atms-bookings", []), i = l.findIndex(b => b.id === id); if (i < 0) throw {code: "notfound"};
+        const c = l.find(b => b.id !== id && b.room === rec.room && b.date === rec.date && rec.start < b.end && b.start < rec.end); if (c) throw {code: "clash", c};
+        Object.assign(l[i], rec, {updatedAt: new Date().toISOString()}); LS.set("atms-bookings", l)
       },
       async remove(id) {LS.set("atms-bookings", LS.get("atms-bookings", []).filter(b => b.id !== id))},
       async setPin(h) {LS.set("atms-pin", h)}
@@ -1308,6 +1517,8 @@
       if (e && e.code === "clash") return `${ROOMS[e.c.room]} was just booked ${fmtT(e.c.start)}–${fmtT(e.c.end)} by ${esc(e.c.who)}. Choose another time.`;
       if (e && e.code === "past") return "That time has already passed. Choose a time later today or another day.";
       if (e && e.code === "busy") return "Someone else is booking this room right now. Wait a few seconds and try again.";
+      if (e && e.code === "forbidden") return "Only the admin can edit bookings. Unlock the Admin tab with the PIN and try again.";
+      if (e && e.code === "notfound") return "This booking no longer exists. It may have been cancelled.";
       if (e && e.code === "invalid") return "Some booking details were not valid. Check the date and time and try again.";
       return "The booking could not be saved. Check your connection and try again.";
     }
@@ -1332,11 +1543,11 @@
     const upcoming = l => l.filter(b => b.date > today || (b.date === today && b.end > nowMin)).sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start);
     const itemHtml = (b, can) => `<div class="item"><div class="meta"><b>${esc(b.title)}</b><span>${fmtD(b.date)} · ${fmtT(b.start)}–${fmtT(b.end)} · ${esc(b.who)}</span></div>
   <div class="actions"><span class="chip ${b.blocked ? "blocked" : b.room}">${b.blocked ? "Blocked · " : ""}${ROOMS[b.room]}</span>${can && canWrite ? `<button class="btn ghost small" data-cancel="${b.id}">Cancel</button>` : ""}</div></div>`;
-    function wireCancel(root) {
+    function wireCancel(root, done) {
       root.querySelectorAll("[data-cancel]").forEach(btn => btn.onclick = async () => {
         if (!btn.dataset.confirm) {btn.dataset.confirm = 1; btn.textContent = "Tap again to cancel"; btn.className = "btn danger small"; return }
         const b = bookings.find(x => x.id === btn.dataset.cancel); btn.disabled = true;
-        try {await api.remove(btn.dataset.cancel); await refresh(true); toast(`Cancelled ${b ? b.title : "booking"}`)} catch (e) {toast("Could not cancel. Try again."); btn.disabled = false}
+        try {await api.remove(btn.dataset.cancel); await refresh(true); toast(`Cancelled ${b ? b.title : "booking"}`); if (done) done()} catch (e) {toast("Could not cancel. Try again."); btn.disabled = false}
       })
     }
     function renderMine() {

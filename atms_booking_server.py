@@ -40,6 +40,17 @@ except Exception:  # Python < 3.9, or Windows without the tzdata package
     TZ = IST
     print("NOTE: using fixed India time (UTC+05:30). Install 'tzdata' to use APP_TIMEZONE.", file=sys.stderr)
 
+DEFAULT_PIN = "1234"                                            # same default as the web page
+
+
+def hash_pin(pin):
+    """Same 32-bit FNV-1a hash the web page uses for the admin PIN."""
+    h = 2166136261
+    for ch in "ob-salt:" + pin:
+        h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+    return format(h, "x")
+
+
 ACCESS_USER = os.environ.get("ACCESS_USER") or "atms"
 ACCESS_PASSWORD = os.environ.get("ACCESS_PASSWORD") or ""
 
@@ -48,8 +59,9 @@ def now_local():
     return datetime.now(TZ).replace(tzinfo=None)  # naive wall-clock time in the office time zone
 
 
-def clean(rec, now=None):
-    """Validate a booking coming from a browser. Returns (record, error_code)."""
+def clean(rec, now=None, existing=None):
+    """Validate a booking coming from a browser. Returns (record, error_code).
+    existing = the stored booking when editing (lets a meeting already in progress keep its start time)."""
     now = now or now_local()
     try:
         room = rec["room"]
@@ -70,7 +82,10 @@ def clean(rec, now=None):
     if (start % STEP or end % STEP or start < OPEN_MIN or end > CLOSE_MIN
             or end <= start or not title or not who):
         return None, "invalid"
-    if day.date() < now.date() or (day.date() == now.date() and start < now.hour * 60 + now.minute):
+    keep_start = bool(existing and existing.get("date") == date and existing.get("start") == start)
+    now_min = now.hour * 60 + now.minute
+    if day.date() < now.date() or (day.date() == now.date()
+                                   and ((start < now_min and not keep_start) or end <= now_min)):
         return None, "past"
     return {
         "room": room, "date": date, "start": start, "end": end,
@@ -82,7 +97,7 @@ def clean(rec, now=None):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ATMSBooking/1.1"
+    server_version = "ATMSBooking/1.2"
 
     def log_message(self, fmt, *args):                          # quieter console
         sys.stderr.write("%s  %s\n" % (now_local().strftime("%H:%M:%S"), fmt % args))
@@ -184,6 +199,45 @@ class Handler(BaseHTTPRequestHandler):
         except store.StorageError:
             return self._busy()
         self._send(404, {"error": {"code": "notfound"}})
+
+    def do_PUT(self):
+        """Admin only: edit a booking's title, room, date or time. Owner (who/uid) and created time are kept."""
+        if not self._authorized():
+            return
+        m = re.fullmatch(r"/api/bookings/([\w-]+)", unquote(urlparse(self.path).path))
+        if not m:
+            return self._send(404, {"error": {"code": "notfound"}})
+        try:
+            body = self._json_body()
+        except Exception:
+            return self._send(400, {"error": {"code": "invalid"}})
+        try:
+            with LOCK:                                          # check + write is one atomic step
+                d = store.load()
+                old = next((b for b in d["bookings"] if b.get("id") == m.group(1)), None)
+                if old is None:
+                    return self._send(404, {"error": {"code": "notfound"}})
+                expected = d.get("pinHash") or hash_pin(DEFAULT_PIN)
+                if not hmac.compare_digest(str(body.get("pinHash", "")).encode(), str(expected).encode()):
+                    return self._send(403, {"error": {"code": "forbidden"}})   # editing is admin-only
+                merged = dict(body)
+                merged["who"] = old.get("who", "")              # people cannot change the owner or block flag
+                merged["uid"] = old.get("uid", "")
+                merged["blocked"] = old.get("blocked", False)
+                rec, err = clean(merged, existing=old)
+                if err:
+                    return self._send(400, {"error": {"code": err}})
+                for b in d["bookings"]:
+                    if b.get("id") != old.get("id") and b["room"] == rec["room"] and b["date"] == rec["date"] \
+                            and rec["start"] < b["end"] and b["start"] < rec["end"]:
+                        return self._send(409, {"error": {"code": "clash", "c": b}})
+                for k in ("room", "date", "start", "end", "title"):
+                    old[k] = rec[k]
+                old["updatedAt"] = rec["createdAt"]
+                store.save(d)
+            return self._send(200, {"id": old["id"]})
+        except store.StorageError:
+            return self._busy()
 
     def do_DELETE(self):
         if not self._authorized():
